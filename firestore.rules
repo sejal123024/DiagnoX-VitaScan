@@ -1,0 +1,120 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /**
+     * Vitascan Voice AI & HackSync Reg Security Rules
+     *
+     * Core Philosophy:
+     * This ruleset enforces a strict "User-Ownership" model. Access to data is tied directly to the 
+     * Firebase Authentication UID, which is mapped to the document structure via path parameters.
+     *
+     * Data Structure:
+     * - VitaScan: All health data is nested under `/users/{userId}/...`, creating a clear hierarchy 
+     *   where the parent path segment dictates access rights for all sub-collections.
+     * - HackSync: Participant registration is stored at the top-level `/participants/{participantId}`, 
+     *   where the document ID corresponds to the user's UID.
+     *
+     * Key Security Decisions:
+     * - Authorization Independence: Rules rely on the {userId} path parameter and denormalized 'userId' 
+     *   fields to make local, performant decisions without cross-document lookups (get() calls).
+     * - User Privacy: General listing of the /users or /participants collections is restricted 
+     *   to the authenticated user's own record.
+     * - Prototyping Flexibility: While ownership is strictly enforced, the schema (data types and 
+     *   non-relational fields) is not validated to allow for rapid frontend iteration.
+     *
+     * Denormalization for Authorization:
+     * - Documents in sub-collections (predictions, alerts) include a 'userId' field.
+     * - On creation, the rules enforce that this field matches the authenticated user and the path.
+     * - On update, this field is immutable to prevent "ownership hijacking."
+     */
+
+    // --- Helper Functions ---
+
+    /** @description Checks if the request is from a signed-in user. */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    /** @description Checks if the authenticated user matches the provided userId. */
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    /** @description Combines ownership check with a check that the document exists for state changes. */
+    function isExistingOwner(userId) {
+      return resource != null && isOwner(userId);
+    }
+
+    // --- Collection Rules ---
+
+    /**
+     * @description Rules for user profile documents.
+     * @path /users/{userId}
+     * @allow (create) if auth.uid matches userId and internal id field matches path.
+     * @deny (list) if user tries to fetch profiles other than their own.
+     * @principle Ownership and Self-Creation.
+     */
+    match /users/{userId} {
+      allow get, list: if isOwner(userId);
+      allow create: if isOwner(userId) && request.resource.data.id == userId;
+      allow update: if isExistingOwner(userId) && request.resource.data.id == resource.data.id;
+      allow delete: if isExistingOwner(userId);
+
+      /**
+       * @description Rules for AI voice analysis results.
+       * @path /users/{userId}/predictions/{predictionId}
+       * @allow (get) if user is the owner of the parent path.
+       * @deny (create) if the internal userId field does not match the parent path.
+       * @principle Path-based authorization with relational integrity.
+       */
+      match /predictions/{predictionId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId) && request.resource.data.userId == userId;
+        allow update: if isExistingOwner(userId) && request.resource.data.userId == resource.data.userId;
+        allow delete: if isExistingOwner(userId);
+      }
+
+      /**
+       * @description Rules for system-generated health alerts.
+       * @path /users/{userId}/alerts/{alertId}
+       * @allow (list) for the owner of the alerts.
+       * @deny (update) if the message is being updated by someone other than the owner.
+       * @principle Resource-specific ownership inheritance.
+       */
+      match /alerts/{alertId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId) && request.resource.data.userId == userId;
+        allow update: if isExistingOwner(userId) && request.resource.data.userId == resource.data.userId;
+        allow delete: if isExistingOwner(userId);
+      }
+
+      /**
+       * @description Rules for the historical timeline summary used for graphing.
+       * @path /users/{userId}/history_summary/{summaryId}
+       * @allow (get) for the owner to fetch their graph data.
+       * @principle Restricted access to user-specific summary data.
+       */
+      match /history_summary/{summaryId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId);
+        allow update: if isExistingOwner(userId);
+        allow delete: if isExistingOwner(userId);
+      }
+    }
+
+    /**
+     * @description Rules for HackSync Reg participant registrations.
+     * @path /participants/{participantId}
+     * @allow (create) if the participantId matches the authenticated UID.
+     * @deny (delete) if a user tries to delete a registration they don't own.
+     * @principle Top-level collection ownership mapping.
+     */
+    match /participants/{participantId} {
+      allow get, list: if isOwner(participantId);
+      allow create: if isOwner(participantId) && request.resource.data.id == participantId;
+      allow update: if isExistingOwner(participantId) && request.resource.data.id == resource.data.id;
+      allow delete: if isExistingOwner(participantId);
+    }
+  }
+}
